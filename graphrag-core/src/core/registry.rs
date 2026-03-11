@@ -303,12 +303,20 @@ impl ServiceContext {
 /// Configuration for service creation
 #[derive(Debug, Clone)]
 pub struct ServiceConfig {
-    /// Base URL for Ollama API server
-    pub ollama_base_url: Option<String>,
+    /// Base URL for the selected LLM provider API server
+    pub llm_base_url: Option<String>,
+    /// LLM provider identifier (e.g. "ollama", "mistral")
+    pub llm_provider: String,
     /// Model name for text embeddings
     pub embedding_model: Option<String>,
     /// Model name for text generation
     pub language_model: Option<String>,
+    /// API key for providers that require authentication
+    pub llm_api_key: Option<String>,
+    /// Default language model temperature
+    pub llm_temperature: Option<f32>,
+    /// Default language model max output tokens
+    pub llm_max_tokens: Option<usize>,
     /// Dimensionality of embedding vectors
     pub vector_dimension: Option<usize>,
     /// Minimum confidence threshold for entity extraction
@@ -324,9 +332,13 @@ pub struct ServiceConfig {
 impl Default for ServiceConfig {
     fn default() -> Self {
         Self {
-            ollama_base_url: Some("http://localhost:11434".to_string()),
+            llm_base_url: Some("http://localhost:11434".to_string()),
+            llm_provider: "ollama".to_string(),
             embedding_model: Some("nomic-embed-text:latest".to_string()),
             language_model: Some("llama3.2:latest".to_string()),
+            llm_api_key: None,
+            llm_temperature: Some(0.7),
+            llm_max_tokens: Some(1000),
             vector_dimension: Some(384),
             entity_confidence_threshold: Some(0.7),
             enable_parallel_processing: true,
@@ -474,37 +486,92 @@ impl ServiceConfig {
         }
 
         // 6. Language Model
-        // Register LLM client for text generation
-        #[cfg(feature = "ollama")]
-        {
-            if let (Some(base_url), Some(model)) = (&self.ollama_base_url, &self.language_model) {
-                use crate::core::ollama_adapters::OllamaLanguageModelAdapter;
-                use crate::ollama::OllamaConfig;
+        // Register LLM client for text generation using provider selection
+        if let Some(model) = &self.language_model {
+            match self.llm_provider.to_lowercase().as_str() {
+                "ollama" => {
+                    #[cfg(feature = "ollama")]
+                    {
+                        let base_url = self
+                            .llm_base_url
+                            .as_deref()
+                            .unwrap_or("http://localhost:11434");
 
-                // Build OllamaConfig from ServiceConfig
-                let mut ollama_config = OllamaConfig::default();
-                // Parse host and port from base_url (format: "http://localhost:11434")
-                if let Some(url_parts) = base_url.split("://").nth(1) {
-                    let parts: Vec<&str> = url_parts.split(':').collect();
-                    if parts.len() >= 2 {
-                        ollama_config.host = format!("http://{}", parts[0]);
-                        if let Ok(port) = parts[1].parse::<u16>() {
-                            ollama_config.port = port;
+                        use crate::core::ollama_adapters::OllamaLanguageModelAdapter;
+                        use crate::ollama::OllamaConfig;
+
+                        let mut ollama_config = OllamaConfig::default();
+                        if let Some(url_parts) = base_url.split("://").nth(1) {
+                            let parts: Vec<&str> = url_parts.split(':').collect();
+                            if parts.len() >= 2 {
+                                ollama_config.host = format!("http://{}", parts[0]);
+                                if let Ok(port) = parts[1].parse::<u16>() {
+                                    ollama_config.port = port;
+                                }
+                            }
                         }
+                        ollama_config.chat_model = model.clone();
+                        ollama_config.enabled = true;
+
+                        let language_model = OllamaLanguageModelAdapter::new(ollama_config);
+                        builder = builder.with_service(language_model);
+
+                        #[cfg(feature = "tracing")]
+                        tracing::info!(
+                            "Registered Ollama language model: {} at {}",
+                            model,
+                            base_url
+                        );
                     }
-                }
-                ollama_config.chat_model = model.clone();
-                ollama_config.enabled = true;
 
-                let language_model = OllamaLanguageModelAdapter::new(ollama_config);
-                builder = builder.with_service(language_model);
+                    #[cfg(not(feature = "ollama"))]
+                    {
+                        #[cfg(feature = "tracing")]
+                        tracing::warn!(
+                            "LLM provider 'ollama' selected but 'ollama' feature is disabled"
+                        );
+                    }
+                },
+                "mistral" => {
+                    #[cfg(feature = "ureq")]
+                    {
+                        use crate::core::mistral_adapters::{
+                            MistralConfig, MistralLanguageModelAdapter,
+                        };
 
-                #[cfg(feature = "tracing")]
-                tracing::info!(
-                    "Registered Ollama language model: {} at {}",
-                    model,
-                    base_url
-                );
+                        let mistral_config = MistralConfig {
+                            base_url: self
+                                .llm_base_url
+                                .clone()
+                                .unwrap_or_else(|| "https://api.mistral.ai".to_string()),
+                            api_key: self.llm_api_key.clone(),
+                            model: model.clone(),
+                            temperature: self.llm_temperature,
+                            max_tokens: self.llm_max_tokens,
+                        };
+
+                        let language_model = MistralLanguageModelAdapter::new(mistral_config);
+                        builder = builder.with_service(language_model);
+
+                        #[cfg(feature = "tracing")]
+                        tracing::info!("Registered Mistral language model: {}", model);
+                    }
+
+                    #[cfg(not(feature = "ureq"))]
+                    {
+                        #[cfg(feature = "tracing")]
+                        tracing::warn!(
+                            "LLM provider 'mistral' selected but 'ureq' feature is disabled"
+                        );
+                    }
+                },
+                _ => {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(
+                        "Unsupported LLM provider '{}', no language model adapter registered",
+                        self.llm_provider
+                    );
+                },
             }
         }
 
@@ -626,9 +693,10 @@ mod tests {
     #[test]
     fn test_service_config_default() {
         let config = ServiceConfig::default();
-        assert!(config.ollama_base_url.is_some());
+        assert!(config.llm_base_url.is_some());
         assert!(config.embedding_model.is_some());
         assert!(config.language_model.is_some());
+        assert_eq!(config.llm_provider, "ollama");
         assert!(config.vector_dimension.is_some());
         assert!(config.entity_confidence_threshold.is_some());
         assert!(config.enable_parallel_processing);
@@ -638,9 +706,13 @@ mod tests {
     #[cfg(feature = "ollama")]
     fn test_service_config_build_with_ollama() {
         let config = ServiceConfig {
-            ollama_base_url: Some("http://localhost:11434".to_string()),
+            llm_base_url: Some("http://localhost:11434".to_string()),
+            llm_provider: "ollama".to_string(),
             embedding_model: Some("nomic-embed-text".to_string()),
             language_model: Some("llama3.2".to_string()),
+            llm_api_key: None,
+            llm_temperature: Some(0.7),
+            llm_max_tokens: Some(1000),
             vector_dimension: Some(768),
             entity_confidence_threshold: Some(0.7),
             enable_parallel_processing: true,
@@ -669,9 +741,13 @@ mod tests {
         use crate::vector::memory_store::MemoryVectorStore;
 
         let config = ServiceConfig {
-            ollama_base_url: None,
+            llm_base_url: None,
+            llm_provider: "ollama".to_string(),
             embedding_model: None,
             language_model: None,
+            llm_api_key: None,
+            llm_temperature: Some(0.7),
+            llm_max_tokens: Some(1000),
             vector_dimension: Some(384), // Set vector dimension to enable MemoryVectorStore
             entity_confidence_threshold: None,
             enable_parallel_processing: false,
@@ -700,9 +776,13 @@ mod tests {
     #[cfg(not(feature = "vector-memory"))]
     fn test_registry_without_vector_memory() {
         let config = ServiceConfig {
-            ollama_base_url: None,
+            llm_base_url: None,
+            llm_provider: "ollama".to_string(),
             embedding_model: None,
             language_model: None,
+            llm_api_key: None,
+            llm_temperature: Some(0.7),
+            llm_max_tokens: Some(1000),
             vector_dimension: Some(384), // Even with dimension set...
             entity_confidence_threshold: None,
             enable_parallel_processing: false,
@@ -716,5 +796,60 @@ mod tests {
         // (This test verifies the feature flag works correctly)
         // Note: We can't import MemoryVectorStore to test for absence since it might not be available,
         // but the build succeeds which means the #[cfg] gate works correctly
+    }
+    #[test]
+    #[cfg(feature = "ureq")]
+    fn test_service_config_build_with_mistral_provider() {
+        use crate::core::mistral_adapters::MistralLanguageModelAdapter;
+
+        let config = ServiceConfig {
+            llm_base_url: Some("https://api.mistral.ai".to_string()),
+            llm_provider: "mistral".to_string(),
+            embedding_model: Some("nomic-embed-text".to_string()),
+            language_model: Some("mistral-small-latest".to_string()),
+            llm_api_key: Some("secret".to_string()),
+            llm_temperature: Some(0.2),
+            llm_max_tokens: Some(256),
+            vector_dimension: Some(384),
+            entity_confidence_threshold: Some(0.7),
+            enable_parallel_processing: true,
+            enable_function_calling: false,
+            enable_monitoring: false,
+        };
+
+        let registry = config.build_registry().build();
+        assert!(registry.has::<MistralLanguageModelAdapter>());
+    }
+
+    #[test]
+    fn test_service_config_build_with_unknown_provider() {
+        let config = ServiceConfig {
+            llm_base_url: Some("http://localhost:11434".to_string()),
+            llm_provider: "unknown-provider".to_string(),
+            embedding_model: None,
+            language_model: Some("some-model".to_string()),
+            llm_api_key: None,
+            llm_temperature: None,
+            llm_max_tokens: None,
+            vector_dimension: None,
+            entity_confidence_threshold: None,
+            enable_parallel_processing: false,
+            enable_function_calling: false,
+            enable_monitoring: false,
+        };
+
+        let registry = config.build_registry().build();
+
+        #[cfg(feature = "ollama")]
+        {
+            use crate::core::ollama_adapters::OllamaLanguageModelAdapter;
+            assert!(!registry.has::<OllamaLanguageModelAdapter>());
+        }
+
+        #[cfg(feature = "ureq")]
+        {
+            use crate::core::mistral_adapters::MistralLanguageModelAdapter;
+            assert!(!registry.has::<MistralLanguageModelAdapter>());
+        }
     }
 }

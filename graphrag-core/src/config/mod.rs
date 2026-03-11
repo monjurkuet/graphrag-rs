@@ -42,6 +42,36 @@ pub use setconfig::{
 };
 pub use validation::{validate_config_file, Validatable, ValidationResult};
 
+/// Provider-agnostic language model configuration
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LlmConfig {
+    /// LLM provider identifier (e.g. "ollama", "mistral")
+    pub provider: String,
+    /// Base URL for the provider API
+    pub base_url: Option<String>,
+    /// Model name for completion/chat generation
+    pub model: String,
+    /// API key for authenticated providers
+    pub api_key: Option<String>,
+    /// Default generation temperature
+    pub temperature: Option<f32>,
+    /// Default max output tokens
+    pub max_tokens: Option<usize>,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            provider: "ollama".to_string(),
+            base_url: Some("http://localhost:11434".to_string()),
+            model: "llama3.2:3b".to_string(),
+            api_key: None,
+            temperature: Some(0.7),
+            max_tokens: Some(1000),
+        }
+    }
+}
+
 /// Configuration for the GraphRAG system
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Config {
@@ -88,6 +118,10 @@ pub struct Config {
 
     /// Ollama integration configuration
     pub ollama: crate::ollama::OllamaConfig,
+
+    /// Provider-agnostic LLM configuration
+    #[serde(default)]
+    pub llm: LlmConfig,
 
     /// GLiNER-Relex extractor configuration
     pub gliner: GlinerConfig,
@@ -145,11 +179,7 @@ impl Default for GlinerConfig {
                 "location".into(),
                 "concept".into(),
             ],
-            relation_labels: vec![
-                "related to".into(),
-                "part of".into(),
-                "causes".into(),
-            ],
+            relation_labels: vec!["related to".into(), "part of".into(), "causes".into()],
             entity_threshold: 0.4,
             relation_threshold: 0.5,
             use_gpu: false,
@@ -1488,6 +1518,7 @@ impl Default for Config {
                 parallel_vector_ops: true,
             },
             ollama: crate::ollama::OllamaConfig::default(),
+            llm: LlmConfig::default(),
             gliner: GlinerConfig::default(),
             enhancements: enhancements::EnhancementsConfig::default(),
             auto_save: AutoSaveConfig {
@@ -1862,12 +1893,35 @@ impl Config {
                     .map(|s| s.to_string()),
                 num_ctx: parsed["ollama"]["num_ctx"].as_u32(),
             },
+            llm: LlmConfig {
+                provider: parsed["llm"]["provider"]
+                    .as_str()
+                    .unwrap_or("ollama")
+                    .to_string(),
+                base_url: parsed["llm"]["base_url"].as_str().map(|s| s.to_string()),
+                model: parsed["llm"]["model"]
+                    .as_str()
+                    .unwrap_or("llama3.2:3b")
+                    .to_string(),
+                api_key: parsed["llm"]["api_key"].as_str().map(|s| s.to_string()),
+                temperature: parsed["llm"]["temperature"].as_f32(),
+                max_tokens: parsed["llm"]["max_tokens"].as_usize(),
+            },
             gliner: GlinerConfig {
-                enabled:            parsed["gliner"]["enabled"].as_bool().unwrap_or(false),
-                model_path:         parsed["gliner"]["model_path"].as_str().unwrap_or("").to_string(),
-                tokenizer_path:     parsed["gliner"]["tokenizer_path"].as_str().unwrap_or("").to_string(),
-                mode:               parsed["gliner"]["mode"].as_str().unwrap_or("span").to_string(),
-                entity_labels:      if parsed["gliner"]["entity_labels"].is_array() {
+                enabled: parsed["gliner"]["enabled"].as_bool().unwrap_or(false),
+                model_path: parsed["gliner"]["model_path"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string(),
+                tokenizer_path: parsed["gliner"]["tokenizer_path"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string(),
+                mode: parsed["gliner"]["mode"]
+                    .as_str()
+                    .unwrap_or("span")
+                    .to_string(),
+                entity_labels: if parsed["gliner"]["entity_labels"].is_array() {
                     parsed["gliner"]["entity_labels"]
                         .members()
                         .filter_map(|v| v.as_str().map(|s| s.to_string()))
@@ -1875,7 +1929,7 @@ impl Config {
                 } else {
                     vec!["person".into(), "organization".into(), "location".into()]
                 },
-                relation_labels:    if parsed["gliner"]["relation_labels"].is_array() {
+                relation_labels: if parsed["gliner"]["relation_labels"].is_array() {
                     parsed["gliner"]["relation_labels"]
                         .members()
                         .filter_map(|v| v.as_str().map(|s| s.to_string()))
@@ -1883,9 +1937,11 @@ impl Config {
                 } else {
                     vec!["related to".into(), "part of".into()]
                 },
-                entity_threshold:   parsed["gliner"]["entity_threshold"].as_f32().unwrap_or(0.4),
-                relation_threshold: parsed["gliner"]["relation_threshold"].as_f32().unwrap_or(0.5),
-                use_gpu:            parsed["gliner"]["use_gpu"].as_bool().unwrap_or(false),
+                entity_threshold: parsed["gliner"]["entity_threshold"].as_f32().unwrap_or(0.4),
+                relation_threshold: parsed["gliner"]["relation_threshold"]
+                    .as_f32()
+                    .unwrap_or(0.5),
+                use_gpu: parsed["gliner"]["use_gpu"].as_bool().unwrap_or(false),
             },
             enhancements: enhancements::EnhancementsConfig {
                 enabled: parsed["enhancements"]["enabled"].as_bool().unwrap_or(true),
@@ -2293,6 +2349,24 @@ impl Config {
         parallel["parallel_graph_ops"] = json::JsonValue::from(self.parallel.parallel_graph_ops);
         parallel["parallel_vector_ops"] = json::JsonValue::from(self.parallel.parallel_vector_ops);
         config_json["parallel"] = parallel;
+
+        // LLM
+        let mut llm = json::JsonValue::new_object();
+        llm["provider"] = json::JsonValue::from(self.llm.provider.as_str());
+        if let Some(base_url) = &self.llm.base_url {
+            llm["base_url"] = json::JsonValue::from(base_url.as_str());
+        }
+        llm["model"] = json::JsonValue::from(self.llm.model.as_str());
+        if let Some(api_key) = &self.llm.api_key {
+            llm["api_key"] = json::JsonValue::from(api_key.as_str());
+        }
+        if let Some(temperature) = self.llm.temperature {
+            llm["temperature"] = json::JsonValue::from(temperature);
+        }
+        if let Some(max_tokens) = self.llm.max_tokens {
+            llm["max_tokens"] = json::JsonValue::from(max_tokens);
+        }
+        config_json["llm"] = llm;
 
         // Enhancements
         let mut enhancements = json::JsonValue::new_object();

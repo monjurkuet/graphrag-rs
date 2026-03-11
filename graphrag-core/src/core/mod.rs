@@ -18,6 +18,10 @@ pub mod traits;
 #[cfg(all(feature = "async", feature = "ollama"))]
 pub mod ollama_adapters;
 
+// Mistral adapters require async feature
+#[cfg(feature = "async")]
+pub mod mistral_adapters;
+
 // Entity extraction adapters require async feature
 #[cfg(feature = "async")]
 pub mod entity_adapters;

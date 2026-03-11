@@ -129,6 +129,9 @@ impl<Output> TypedBuilder<Output, NoLlm> {
         self.config.ollama.host = "localhost".to_string();
         self.config.ollama.port = 11434;
         self.config.embeddings.backend = "ollama".to_string();
+        self.config.llm.provider = "ollama".to_string();
+        self.config.llm.base_url = Some("http://localhost:11434".to_string());
+        self.config.llm.model = self.config.ollama.chat_model.clone();
         TypedBuilder {
             config: self.config,
             _output: PhantomData,
@@ -148,6 +151,42 @@ impl<Output> TypedBuilder<Output, NoLlm> {
         self.config.ollama.port = port;
         self.config.ollama.chat_model = chat_model.to_string();
         self.config.embeddings.backend = "ollama".to_string();
+        self.config.llm.provider = "ollama".to_string();
+        self.config.llm.base_url = Some(format!("http://{}:{}", host, port));
+        self.config.llm.model = self.config.ollama.chat_model.clone();
+        TypedBuilder {
+            config: self.config,
+            _output: PhantomData,
+            _llm: PhantomData,
+        }
+    }
+
+    /// Configure for Mistral LLM using default hosted endpoint
+    pub fn with_mistral(mut self, api_key: impl Into<String>) -> TypedBuilder<Output, HasLlm> {
+        self.config.llm.provider = "mistral".to_string();
+        self.config.llm.base_url = Some("https://api.mistral.ai".to_string());
+        self.config.llm.model = "mistral-small-latest".to_string();
+        self.config.llm.api_key = Some(api_key.into());
+        self.config.embeddings.backend = "api".to_string();
+        TypedBuilder {
+            config: self.config,
+            _output: PhantomData,
+            _llm: PhantomData,
+        }
+    }
+
+    /// Configure for Mistral LLM with a custom endpoint/model.
+    pub fn with_mistral_custom(
+        mut self,
+        base_url: &str,
+        model: &str,
+        api_key: Option<&str>,
+    ) -> TypedBuilder<Output, HasLlm> {
+        self.config.llm.provider = "mistral".to_string();
+        self.config.llm.base_url = Some(base_url.to_string());
+        self.config.llm.model = model.to_string();
+        self.config.llm.api_key = api_key.map(|k| k.to_string());
+        self.config.embeddings.backend = "api".to_string();
         TypedBuilder {
             config: self.config,
             _output: PhantomData,
@@ -419,6 +458,14 @@ impl GraphRAGBuilder {
     /// ```
     pub fn with_ollama_enabled(mut self, enabled: bool) -> Self {
         self.config.ollama.enabled = enabled;
+        if enabled {
+            self.config.llm.provider = "ollama".to_string();
+            self.config.llm.base_url = Some(format!(
+                "http://{}:{}",
+                self.config.ollama.host, self.config.ollama.port
+            ));
+            self.config.llm.model = self.config.ollama.chat_model.clone();
+        }
         self
     }
 
@@ -432,6 +479,9 @@ impl GraphRAGBuilder {
     /// ```
     pub fn with_chat_model(mut self, model: &str) -> Self {
         self.config.ollama.chat_model = model.to_string();
+        if self.config.llm.provider == "ollama" {
+            self.config.llm.model = model.to_string();
+        }
         self
     }
 
@@ -445,6 +495,31 @@ impl GraphRAGBuilder {
     /// ```
     pub fn with_ollama_embedding_model(mut self, model: &str) -> Self {
         self.config.ollama.embedding_model = model.to_string();
+        self
+    }
+
+    /// Configure LLM provider for Mistral with default hosted endpoint.
+    pub fn with_mistral(mut self, api_key: impl Into<String>) -> Self {
+        self.config.llm.provider = "mistral".to_string();
+        self.config.llm.base_url = Some("https://api.mistral.ai".to_string());
+        self.config.llm.model = "mistral-small-latest".to_string();
+        self.config.llm.api_key = Some(api_key.into());
+        self.config.embeddings.backend = "api".to_string();
+        self
+    }
+
+    /// Configure LLM provider for Mistral with custom endpoint and model.
+    pub fn with_mistral_custom(
+        mut self,
+        base_url: &str,
+        model: &str,
+        api_key: Option<&str>,
+    ) -> Self {
+        self.config.llm.provider = "mistral".to_string();
+        self.config.llm.base_url = Some(base_url.to_string());
+        self.config.llm.model = model.to_string();
+        self.config.llm.api_key = api_key.map(|k| k.to_string());
+        self.config.embeddings.backend = "api".to_string();
         self
     }
 
@@ -560,6 +635,9 @@ impl GraphRAGBuilder {
         self.config.ollama.host = "localhost".to_string();
         self.config.ollama.port = 11434;
         self.config.embeddings.backend = "candle".to_string();
+        self.config.llm.provider = "ollama".to_string();
+        self.config.llm.base_url = Some("http://localhost:11434".to_string());
+        self.config.llm.model = self.config.ollama.chat_model.clone();
         self
     }
 
@@ -807,5 +885,31 @@ mod tests {
 
         assert!(builder.config().ollama.enabled);
         assert_eq!(builder.config().output_dir, "./test");
+    }
+    #[test]
+    fn test_builder_with_mistral() {
+        let builder = GraphRAGBuilder::new().with_mistral("test-key");
+        assert_eq!(builder.config().llm.provider, "mistral");
+        assert_eq!(builder.config().llm.model, "mistral-small-latest");
+        assert_eq!(builder.config().llm.api_key.as_deref(), Some("test-key"));
+    }
+
+    #[test]
+    fn test_typed_builder_with_mistral_custom() {
+        let builder = TypedBuilder::new()
+            .with_output_dir("./test")
+            .with_mistral_custom(
+                "https://mistral.example.com",
+                "mistral-large-latest",
+                Some("k"),
+            );
+
+        assert_eq!(builder.config().llm.provider, "mistral");
+        assert_eq!(
+            builder.config().llm.base_url.as_deref(),
+            Some("https://mistral.example.com")
+        );
+        assert_eq!(builder.config().llm.model, "mistral-large-latest");
+        assert_eq!(builder.config().llm.api_key.as_deref(), Some("k"));
     }
 }
