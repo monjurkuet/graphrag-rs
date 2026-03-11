@@ -307,6 +307,8 @@ pub struct ServiceConfig {
     pub llm_base_url: Option<String>,
     /// LLM provider identifier (e.g. "ollama", "mistral")
     pub llm_provider: String,
+    /// Embedding backend identifier (e.g. "ollama", "mistral", "hash")
+    pub embedding_backend: Option<String>,
     /// Model name for text embeddings
     pub embedding_model: Option<String>,
     /// Model name for text generation
@@ -334,11 +336,12 @@ impl Default for ServiceConfig {
         Self {
             llm_base_url: Some("http://localhost:11434".to_string()),
             llm_provider: "ollama".to_string(),
+            embedding_backend: Some("ollama".to_string()),
             embedding_model: Some("nomic-embed-text:latest".to_string()),
             language_model: Some("llama3.2:latest".to_string()),
             llm_api_key: None,
-            llm_temperature: Some(0.7),
-            llm_max_tokens: Some(1000),
+            llm_temperature: None,
+            llm_max_tokens: None,
             vector_dimension: Some(384),
             entity_confidence_threshold: Some(0.7),
             enable_parallel_processing: true,
@@ -368,9 +371,9 @@ impl ServiceConfig {
     /// use graphrag_core::core::registry::ServiceConfig;
     ///
     /// let config = ServiceConfig::default();
-    /// let registry = config.build_registry().build();
+    /// let registry = config.build_registry().unwrap().build();
     /// ```
-    pub fn build_registry(&self) -> RegistryBuilder {
+    pub fn build_registry(&self) -> Result<RegistryBuilder> {
         let mut builder = RegistryBuilder::new();
 
         // 1. Storage Layer
@@ -434,6 +437,33 @@ impl ServiceConfig {
                         model,
                         dimension
                     );
+                }
+            }
+        }
+
+        // Mistral embedder
+        #[cfg(feature = "ureq")]
+        {
+            if let Some(backend) = &self.embedding_backend {
+                if backend.to_lowercase() == "mistral" {
+                    if let Some(model) = &self.embedding_model {
+                        if let Some(dimension) = self.vector_dimension {
+                            use crate::core::mistral_adapters::MistralEmbedderAdapter;
+
+                            let base = self.llm_base_url.clone().unwrap_or_else(|| "https://api.mistral.ai".to_string());
+                            // Prefer explicit LLM API key in config, otherwise check environment
+                            let api_key = self.llm_api_key.clone().or_else(|| {
+                                std::env::var("MISTRAL_EMBEDDINGS_API_KEY")
+                                    .ok()
+                                    .or_else(|| std::env::var("MISTRAL_API_KEY").ok())
+                            });
+                            let embedder = MistralEmbedderAdapter::new(base, model.clone(), dimension, api_key);
+                            builder = builder.with_service(embedder);
+
+                            #[cfg(feature = "tracing")]
+                            tracing::info!("Registered Mistral embedder with model: {} dimension: {}", model, dimension);
+                        }
+                    }
                 }
             }
         }
@@ -533,6 +563,12 @@ impl ServiceConfig {
                     }
                 },
                 "mistral" => {
+                    if self.llm_api_key.is_none() {
+                        return Err(GraphRAGError::Config {
+                            message: "Missing llm_api_key for Mistral provider".to_string(),
+                        });
+                    }
+
                     #[cfg(feature = "ureq")]
                     {
                         use crate::core::mistral_adapters::{
@@ -566,11 +602,12 @@ impl ServiceConfig {
                     }
                 },
                 _ => {
-                    #[cfg(feature = "tracing")]
-                    tracing::warn!(
-                        "Unsupported LLM provider '{}', no language model adapter registered",
-                        self.llm_provider
-                    );
+                    return Err(GraphRAGError::Config {
+                        message: format!(
+                            "Unsupported LLM provider '{}'; supported providers: ollama, mistral",
+                            self.llm_provider
+                        ),
+                    });
                 },
             }
         }
@@ -625,7 +662,7 @@ impl ServiceConfig {
             }
         }
 
-        builder
+        Ok(builder)
     }
 }
 
@@ -697,6 +734,8 @@ mod tests {
         assert!(config.embedding_model.is_some());
         assert!(config.language_model.is_some());
         assert_eq!(config.llm_provider, "ollama");
+        assert!(config.llm_temperature.is_none());
+        assert!(config.llm_max_tokens.is_none());
         assert!(config.vector_dimension.is_some());
         assert!(config.entity_confidence_threshold.is_some());
         assert!(config.enable_parallel_processing);
@@ -708,6 +747,7 @@ mod tests {
         let config = ServiceConfig {
             llm_base_url: Some("http://localhost:11434".to_string()),
             llm_provider: "ollama".to_string(),
+            embedding_backend: Some("ollama".to_string()),
             embedding_model: Some("nomic-embed-text".to_string()),
             language_model: Some("llama3.2".to_string()),
             llm_api_key: None,
@@ -720,7 +760,7 @@ mod tests {
             enable_monitoring: false,
         };
 
-        let registry = config.build_registry().build();
+        let registry = config.build_registry().unwrap().build();
 
         // Verify services are registered
         #[cfg(feature = "memory-storage")]
@@ -743,6 +783,7 @@ mod tests {
         let config = ServiceConfig {
             llm_base_url: None,
             llm_provider: "ollama".to_string(),
+            embedding_backend: None,
             embedding_model: None,
             language_model: None,
             llm_api_key: None,
@@ -755,7 +796,7 @@ mod tests {
             enable_monitoring: false,
         };
 
-        let registry = config.build_registry().build();
+        let registry = config.build_registry().unwrap().build();
 
         // When vector-memory feature is enabled and vector_dimension is set,
         // MemoryVectorStore should be registered
@@ -778,6 +819,7 @@ mod tests {
         let config = ServiceConfig {
             llm_base_url: None,
             llm_provider: "ollama".to_string(),
+            embedding_backend: None,
             embedding_model: None,
             language_model: None,
             llm_api_key: None,
@@ -790,7 +832,7 @@ mod tests {
             enable_monitoring: false,
         };
 
-        let registry = config.build_registry().build();
+        let registry = config.build_registry().unwrap().build();
 
         // When vector-memory feature is disabled, MemoryVectorStore should NOT be registered
         // (This test verifies the feature flag works correctly)
@@ -805,6 +847,7 @@ mod tests {
         let config = ServiceConfig {
             llm_base_url: Some("https://api.mistral.ai".to_string()),
             llm_provider: "mistral".to_string(),
+            embedding_backend: None,
             embedding_model: Some("nomic-embed-text".to_string()),
             language_model: Some("mistral-small-latest".to_string()),
             llm_api_key: Some("secret".to_string()),
@@ -817,8 +860,30 @@ mod tests {
             enable_monitoring: false,
         };
 
-        let registry = config.build_registry().build();
+        let registry = config.build_registry().unwrap().build();
         assert!(registry.has::<MistralLanguageModelAdapter>());
+    }
+
+    #[test]
+    #[cfg(feature = "ureq")]
+    fn test_service_config_build_with_mistral_missing_api_key() {
+        let config = ServiceConfig {
+            llm_base_url: Some("https://api.mistral.ai".to_string()),
+            llm_provider: "mistral".to_string(),
+            embedding_backend: None,
+            embedding_model: Some("nomic-embed-text".to_string()),
+            language_model: Some("mistral-small-latest".to_string()),
+            llm_api_key: None,
+            llm_temperature: Some(0.2),
+            llm_max_tokens: Some(256),
+            vector_dimension: Some(384),
+            entity_confidence_threshold: Some(0.7),
+            enable_parallel_processing: true,
+            enable_function_calling: false,
+            enable_monitoring: false,
+        };
+
+        assert!(config.build_registry().is_err());
     }
 
     #[test]
@@ -838,18 +903,7 @@ mod tests {
             enable_monitoring: false,
         };
 
-        let registry = config.build_registry().build();
-
-        #[cfg(feature = "ollama")]
-        {
-            use crate::core::ollama_adapters::OllamaLanguageModelAdapter;
-            assert!(!registry.has::<OllamaLanguageModelAdapter>());
-        }
-
-        #[cfg(feature = "ureq")]
-        {
-            use crate::core::mistral_adapters::MistralLanguageModelAdapter;
-            assert!(!registry.has::<MistralLanguageModelAdapter>());
-        }
+        let registry = config.build_registry();
+        assert!(registry.is_err());
     }
 }

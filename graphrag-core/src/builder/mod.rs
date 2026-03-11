@@ -36,6 +36,14 @@ use crate::config::Config;
 use crate::core::Result;
 use std::marker::PhantomData;
 
+fn configure_mistral_llm(config: &mut Config, base_url: &str, model: &str, api_key: Option<&str>) {
+    config.llm.provider = "mistral".to_string();
+    config.llm.base_url = Some(base_url.to_string());
+    config.llm.model = model.to_string();
+    config.llm.api_key = api_key.map(|k| k.to_string());
+    config.embeddings.backend = "api".to_string();
+}
+
 // ============================================================================
 // TYPE-STATE BUILDER - Compile-time validation
 // ============================================================================
@@ -163,11 +171,13 @@ impl<Output> TypedBuilder<Output, NoLlm> {
 
     /// Configure for Mistral LLM using default hosted endpoint
     pub fn with_mistral(mut self, api_key: impl Into<String>) -> TypedBuilder<Output, HasLlm> {
-        self.config.llm.provider = "mistral".to_string();
-        self.config.llm.base_url = Some("https://api.mistral.ai".to_string());
-        self.config.llm.model = "mistral-small-latest".to_string();
-        self.config.llm.api_key = Some(api_key.into());
-        self.config.embeddings.backend = "api".to_string();
+        let api_key = api_key.into();
+        configure_mistral_llm(
+            &mut self.config,
+            "https://api.mistral.ai",
+            "mistral-small-latest",
+            Some(&api_key),
+        );
         TypedBuilder {
             config: self.config,
             _output: PhantomData,
@@ -182,11 +192,7 @@ impl<Output> TypedBuilder<Output, NoLlm> {
         model: &str,
         api_key: Option<&str>,
     ) -> TypedBuilder<Output, HasLlm> {
-        self.config.llm.provider = "mistral".to_string();
-        self.config.llm.base_url = Some(base_url.to_string());
-        self.config.llm.model = model.to_string();
-        self.config.llm.api_key = api_key.map(|k| k.to_string());
-        self.config.embeddings.backend = "api".to_string();
+        configure_mistral_llm(&mut self.config, base_url, model, api_key);
         TypedBuilder {
             config: self.config,
             _output: PhantomData,
@@ -212,6 +218,41 @@ impl<Output> TypedBuilder<Output, NoLlm> {
     /// Configure for Candle neural embeddings (local, no API needed)
     pub fn with_candle_embeddings(mut self) -> TypedBuilder<Output, HasLlm> {
         self.config.embeddings.backend = "candle".to_string();
+        TypedBuilder {
+            config: self.config,
+            _output: PhantomData,
+            _llm: PhantomData,
+        }
+    }
+
+    /// Configure for Mistral embeddings with default hosted endpoint
+    pub fn with_mistral_embeddings(mut self, api_key: impl Into<String>, model: &str, dimension: usize) -> TypedBuilder<Output, HasLlm> {
+        let key = api_key.into();
+        self.config.embeddings.backend = "mistral".to_string();
+        self.config.embeddings.model = Some(model.to_string());
+        self.config.embeddings.dimension = dimension;
+        self.config.embeddings.api_key = Some(key.clone());
+        // Keep LLM settings in sync as an option
+        self.config.llm.provider = "mistral".to_string();
+        self.config.llm.base_url = Some("https://api.mistral.ai".to_string());
+        self.config.llm.api_key = Some(key);
+
+        TypedBuilder {
+            config: self.config,
+            _output: PhantomData,
+            _llm: PhantomData,
+        }
+    }
+
+    /// Configure for Mistral embeddings with custom endpoint
+    pub fn with_mistral_embeddings_custom(mut self, base_url: &str, model: &str, api_key: Option<&str>, dimension: usize) -> TypedBuilder<Output, HasLlm> {
+        self.config.embeddings.backend = "mistral".to_string();
+        self.config.embeddings.model = Some(model.to_string());
+        self.config.embeddings.dimension = dimension;
+        self.config.embeddings.api_key = api_key.map(|s| s.to_string());
+        self.config.llm.provider = "mistral".to_string();
+        self.config.llm.base_url = Some(base_url.to_string());
+        self.config.llm.api_key = api_key.map(|s| s.to_string());
         TypedBuilder {
             config: self.config,
             _output: PhantomData,
@@ -465,6 +506,12 @@ impl GraphRAGBuilder {
                 self.config.ollama.host, self.config.ollama.port
             ));
             self.config.llm.model = self.config.ollama.chat_model.clone();
+        } else {
+            // When disabling Ollama, clear LLM-specific settings to avoid stale config
+            self.config.llm.provider = "none".to_string();
+            self.config.llm.base_url = None;
+            self.config.llm.model = String::new();
+            self.config.llm.api_key = None;
         }
         self
     }
@@ -477,6 +524,10 @@ impl GraphRAGBuilder {
     /// let builder = GraphRAGBuilder::new()
     ///     .with_chat_model("llama3.2:latest");
     /// ```
+    ///
+    /// Note: this method updates the Ollama chat model and will also update
+    /// the provider-agnostic `llm.model` only when the current provider is
+    /// configured as `ollama`.
     pub fn with_chat_model(mut self, model: &str) -> Self {
         self.config.ollama.chat_model = model.to_string();
         if self.config.llm.provider == "ollama" {
@@ -500,11 +551,13 @@ impl GraphRAGBuilder {
 
     /// Configure LLM provider for Mistral with default hosted endpoint.
     pub fn with_mistral(mut self, api_key: impl Into<String>) -> Self {
-        self.config.llm.provider = "mistral".to_string();
-        self.config.llm.base_url = Some("https://api.mistral.ai".to_string());
-        self.config.llm.model = "mistral-small-latest".to_string();
-        self.config.llm.api_key = Some(api_key.into());
-        self.config.embeddings.backend = "api".to_string();
+        let api_key = api_key.into();
+        configure_mistral_llm(
+            &mut self.config,
+            "https://api.mistral.ai",
+            "mistral-small-latest",
+            Some(&api_key),
+        );
         self
     }
 
@@ -515,11 +568,47 @@ impl GraphRAGBuilder {
         model: &str,
         api_key: Option<&str>,
     ) -> Self {
-        self.config.llm.provider = "mistral".to_string();
-        self.config.llm.base_url = Some(base_url.to_string());
-        self.config.llm.model = model.to_string();
-        self.config.llm.api_key = api_key.map(|k| k.to_string());
-        self.config.embeddings.backend = "api".to_string();
+        configure_mistral_llm(&mut self.config, base_url, model, api_key);
+        self
+    }
+
+    /// Configure embeddings to use Mistral (embeddings-only path)
+    ///
+    /// This configures the `embeddings` section to use the Mistral backend
+    /// and does NOT change the provider-agnostic `llm` settings. Use
+    /// `with_mistral()` to configure both LLM + embeddings together.
+    pub fn with_mistral_embeddings(
+        mut self,
+        api_key: impl Into<String>,
+        model: &str,
+        dimension: usize,
+    ) -> Self {
+        let key = api_key.into();
+        self.config.embeddings.backend = "mistral".to_string();
+        self.config.embeddings.model = Some(model.to_string());
+        self.config.embeddings.dimension = dimension;
+        self.config.embeddings.api_key = Some(key);
+        self
+    }
+
+    /// Configure embeddings to use Mistral with a custom endpoint
+    pub fn with_mistral_embeddings_custom(
+        mut self,
+        base_url: &str,
+        api_key: Option<&str>,
+        model: &str,
+        dimension: usize,
+    ) -> Self {
+        self.config.embeddings.backend = "mistral".to_string();
+        self.config.embeddings.model = Some(model.to_string());
+        self.config.embeddings.dimension = dimension;
+        self.config.embeddings.api_key = api_key.map(|s| s.to_string());
+        // Do not mutate `llm` provider here; this is embeddings-only
+        // Adapter code will use `llm.base_url` only if needed when instantiating
+        // the Mistral embedder in the registry.
+        // If a custom base_url is needed for the adapter, ServiceConfig can
+        // be extended to carry it; for now we expect the embedding adapter
+        // to derive endpoint from its own config or the root `llm.base_url`.
         self
     }
 
@@ -903,6 +992,35 @@ mod tests {
                 "mistral-large-latest",
                 Some("k"),
             );
+
+    #[test]
+    fn test_builder_with_mistral_embeddings() {
+        let builder = GraphRAGBuilder::new()
+            .with_mistral_embeddings("sk-test", "mistral-embed-text", 1024);
+
+        assert_eq!(builder.config().embeddings.backend, "mistral");
+        assert_eq!(builder.config().embeddings.model, Some("mistral-embed-text".to_string()));
+        assert_eq!(builder.config().embeddings.dimension, 1024);
+        assert_eq!(builder.config().embeddings.api_key, Some("sk-test".to_string()));
+        // embeddings-only should not forcibly set the llm provider to mistral
+        assert_ne!(builder.config().llm.provider, "mistral");
+    }
+
+    #[test]
+    fn test_builder_with_mistral_embeddings_custom() {
+        let builder = GraphRAGBuilder::new().with_mistral_embeddings_custom(
+            "https://custom.mistral",
+            Some("sk-custom"),
+            "mistral-embed-x",
+            1536,
+        );
+
+        assert_eq!(builder.config().embeddings.backend, "mistral");
+        assert_eq!(builder.config().embeddings.model, Some("mistral-embed-x".to_string()));
+        assert_eq!(builder.config().embeddings.dimension, 1536);
+        assert_eq!(builder.config().embeddings.api_key, Some("sk-custom".to_string()));
+        assert_ne!(builder.config().llm.provider, "mistral");
+    }
 
         assert_eq!(builder.config().llm.provider, "mistral");
         assert_eq!(

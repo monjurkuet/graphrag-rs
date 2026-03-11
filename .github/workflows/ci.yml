@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Run crate tests
+        env:
+          MISTRAL_EMBEDDINGS_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+        run: |
+          cargo test -p graphrag-core --all-features

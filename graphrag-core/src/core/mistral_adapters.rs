@@ -4,7 +4,7 @@
 //! that implement core GraphRAG async traits.
 
 use crate::core::error::{GraphRAGError, Result};
-use crate::core::traits::{AsyncLanguageModel, GenerationParams, ModelInfo, ModelUsageStats};
+use crate::core::traits::{AsyncEmbedder, AsyncLanguageModel, GenerationParams, ModelInfo, ModelUsageStats};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,8 +24,8 @@ impl Default for MistralConfig {
             base_url: "https://api.mistral.ai".to_string(),
             api_key: None,
             model: "mistral-small-latest".to_string(),
-            temperature: Some(0.7),
-            max_tokens: Some(1000),
+            temperature: None,
+            max_tokens: None,
         }
     }
 }
@@ -215,6 +215,134 @@ impl AsyncLanguageModel for MistralLanguageModelAdapter {
                 0.0
             },
         })
+    }
+}
+
+// ============================================================================
+// Mistral Embeddings Adapter
+// ============================================================================
+
+#[derive(Debug, Serialize)]
+struct EmbeddingRequest {
+    model: String,
+    input: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbeddingResponse {
+    data: Vec<EmbeddingData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbeddingData {
+    embedding: Vec<f32>,
+}
+
+/// Adapter for Mistral Embeddings API implementing AsyncEmbedder.
+pub struct MistralEmbedderAdapter {
+    base_url: String,
+    api_key: Option<String>,
+    model: String,
+    dimension: usize,
+    total_requests: AtomicU64,
+    failed_requests: AtomicU64,
+}
+
+impl MistralEmbedderAdapter {
+    /// Create a new Mistral embedder adapter
+    pub fn new(base_url: impl Into<String>, model: impl Into<String>, dimension: usize, api_key: Option<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            api_key,
+            model: model.into(),
+            dimension,
+            total_requests: AtomicU64::new(0),
+            failed_requests: AtomicU64::new(0),
+        }
+    }
+
+    fn endpoint(&self) -> String {
+        format!("{}/v1/embeddings", self.base_url.trim_end_matches('/'))
+    }
+
+    async fn post_embeddings(&self, inputs: Vec<String>) -> Result<Vec<Vec<f32>>> {
+        self.total_requests.fetch_add(1, Ordering::Relaxed);
+
+        #[cfg(feature = "ureq")]
+        {
+            let endpoint = self.endpoint();
+            let api_key = self.api_key.clone();
+            let request = EmbeddingRequest { model: self.model.clone(), input: inputs };
+            let payload = serde_json::to_string(&request).map_err(|e| GraphRAGError::Embedding {
+                message: format!("Failed to serialize Mistral embedding request: {e}"),
+            })?;
+
+            let response = tokio::task::spawn_blocking(move || {
+                let mut req = ureq::post(&endpoint).set("Content-Type", "application/json");
+
+                if let Some(key) = api_key.as_deref() {
+                    req = req.set("Authorization", &format!("Bearer {}", key));
+                }
+
+                req.send_string(&payload)
+            })
+            .await
+            .map_err(|e| GraphRAGError::Embedding {
+                message: format!("Mistral embedding request task failed: {e}"),
+            })?;
+
+            match response {
+                Ok(resp) => {
+                    let raw = resp.into_string().map_err(|e| GraphRAGError::Embedding {
+                        message: format!("Failed to read Mistral response body: {e}"),
+                    })?;
+
+                    let parsed: EmbeddingResponse = serde_json::from_str(&raw).map_err(|e| GraphRAGError::Embedding {
+                        message: format!("Failed to parse Mistral response: {e}"),
+                    })?;
+
+                    Ok(parsed.data.into_iter().map(|d| d.embedding).collect())
+                },
+                Err(e) => {
+                    self.failed_requests.fetch_add(1, Ordering::Relaxed);
+                    Err(GraphRAGError::Embedding { message: format!("Mistral API request failed: {e}") })
+                },
+            }
+        }
+
+        #[cfg(not(feature = "ureq"))]
+        {
+            self.failed_requests.fetch_add(1, Ordering::Relaxed);
+            Err(GraphRAGError::Unsupported {
+                operation: "mistral-embedding".to_string(),
+                reason: "Mistral embedder requires the `ureq` feature".to_string(),
+            })
+        }
+    }
+}
+
+#[async_trait]
+impl AsyncEmbedder for MistralEmbedderAdapter {
+    type Error = GraphRAGError;
+
+    async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        let mut inputs = Vec::with_capacity(1);
+        inputs.push(text.to_string());
+        let mut out = self.post_embeddings(inputs).await?;
+        out.pop().ok_or(GraphRAGError::Embedding { message: "Empty embedding response".to_string() })
+    }
+
+    async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        let inputs = texts.iter().map(|s| s.to_string()).collect();
+        self.post_embeddings(inputs).await
+    }
+
+    fn dimension(&self) -> usize {
+        self.dimension
+    }
+
+    async fn is_ready(&self) -> bool {
+        true
     }
 }
 

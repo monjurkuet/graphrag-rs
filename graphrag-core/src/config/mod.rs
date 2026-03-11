@@ -1,4 +1,5 @@
 use crate::Result;
+use crate::ollama::OllamaConfig;
 use std::fs;
 
 /// Enhanced configuration options for GraphRAG
@@ -52,6 +53,7 @@ pub struct LlmConfig {
     /// Model name for completion/chat generation
     pub model: String,
     /// API key for authenticated providers
+    #[serde(skip_serializing)]
     pub api_key: Option<String>,
     /// Default generation temperature
     pub temperature: Option<f32>,
@@ -61,13 +63,14 @@ pub struct LlmConfig {
 
 impl Default for LlmConfig {
     fn default() -> Self {
+        let ollama = OllamaConfig::default();
         Self {
             provider: "ollama".to_string(),
-            base_url: Some("http://localhost:11434".to_string()),
-            model: "llama3.2:3b".to_string(),
+            base_url: Some(format!("{}:{}", ollama.host.trim_end_matches('/'), ollama.port)),
+            model: ollama.chat_model.clone(),
             api_key: None,
-            temperature: Some(0.7),
-            max_tokens: Some(1000),
+            temperature: None,
+            max_tokens: None,
         }
     }
 }
@@ -1003,7 +1006,9 @@ pub struct EmbeddingConfig {
     pub api_endpoint: Option<String>,
 
     /// API key for external embedding service
-    /// Can also be set via environment variables (OPENAI_API_KEY, VOYAGE_API_KEY, etc.)
+    /// Can also be set via environment variables (MISTRAL_API_KEY, OPENAI_API_KEY, VOYAGE_API_KEY, etc.)
+    /// NOTE: This field is not serialized to disk to avoid committing secrets.
+    #[serde(skip_serializing)]
     pub api_key: Option<String>,
 
     /// Cache directory for downloaded models (HuggingFace)
@@ -2357,9 +2362,6 @@ impl Config {
             llm["base_url"] = json::JsonValue::from(base_url.as_str());
         }
         llm["model"] = json::JsonValue::from(self.llm.model.as_str());
-        if let Some(api_key) = &self.llm.api_key {
-            llm["api_key"] = json::JsonValue::from(api_key.as_str());
-        }
         if let Some(temperature) = self.llm.temperature {
             llm["temperature"] = json::JsonValue::from(temperature);
         }
@@ -2490,5 +2492,19 @@ impl Config {
         let content = json::stringify_pretty(config_json, 2);
         fs::write(path, content)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_llm_api_key_not_serialized() {
+        let mut config = Config::default();
+        config.llm.api_key = Some("secret".to_string());
+
+        let json = serde_json::to_string(&config).expect("serialize config");
+        assert!(!json.contains("secret"), "API key should not be serialized");
     }
 }
